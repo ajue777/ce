@@ -37,8 +37,8 @@ class v5(IStrategy):
 
     INTERFACE_VERSION = 3
 
-    minimal_roi = {"0": 0.3}
-    stoploss = -0.40
+    minimal_roi = {"240": 0.08}
+    stoploss = -0.30
     trailing_stop = False
 
     timeframe = '15m'
@@ -52,7 +52,7 @@ class v5(IStrategy):
     use_custom_stoploss = True
     position_adjustment_Enabled = True
 
-    max_dca_entries = 4  # 初始入场 + 最多 3 次加仓
+    max_dca_entries = 4  # 初始入场 + 最多 4次加仓
 
     @informative('1h')
     def populate_indicators_1h(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -87,20 +87,20 @@ class v5(IStrategy):
             if num_entries == 0:
                 return total_balance * 0.40   # 初始入场 20%
             elif num_entries == 1:
-                return total_balance * 0.30   # 第一次加仓 30%
+                return total_balance * 0.20   # 第一次加仓 30%
             elif num_entries == 2:
                 return total_balance * 0.20   # 第二次加仓 20%
             elif num_entries == 3:
-                return total_balance * 0.10   # 第三次加仓 30%
+                return total_balance * 0.20   # 第三次加仓 30%
             else:
                 return 0
         elif entry_tag == 'buy_signal_rsi_special_dca':
             if num_entries == 0:
                 return total_balance * 0.20   # 初始入场 40%
             elif num_entries == 1:
-                return total_balance * 0.50   # 第一次加仓 30%
+                return total_balance * 0.30   # 第一次加仓 30%
             elif num_entries == 2:
-                return total_balance * 0.20   # 第二次加仓 20%
+                return total_balance * 0.40   # 第二次加仓 20%
             elif num_entries == 3:
                 return total_balance * 0.10   # 第三次加仓 10%
             else:
@@ -119,19 +119,28 @@ class v5(IStrategy):
         """
         trades = self.strategy.get_open_trades_for_pair(pair)
         if not trades:
-            return entry_tag == 'buy_signal_rsi_normal'
+            return entry_tag in ['buy_signal_rsi_normal', 'buy_signal_rsi_special_dca']  # 允许两种信号触发初始入场
         else:
             if len(trades) >= self.max_dca_entries:
                 return False  # 达到最大加仓次数，不再加仓
 
+        if entry_tag == 'buy_signal_rsi_special_dca':
+            # 从最后一笔交易中获取信号触发时的价格
+            signal_price = trades[-1].custom_data.get('signal_price', None)
+            if signal_price:
+                price_drop = (signal_price - current_rate) / signal_price
+                return price_drop >= 0.6  # 当前价格从信号触发价格下跌 ≥ 10%
+        
+        # 处理普通信号（可选，保留原有逻辑）
+        elif entry_tag == 'buy_signal_rsi_normal':
             last_trade = trades[-1]
             if last_trade and last_trade.is_open:
                 price_drop = (last_trade.open_rate - current_rate) / last_trade.open_rate
-                if entry_tag == 'buy_signal_rsi_normal':
-                    return price_drop >= 0.03  # 正常信号要求跌幅 ≥ 5%
-                elif entry_tag == 'buy_signal_rsi_special_dca':
-                    return price_drop >= 0.1  # 特殊加仓信号要求跌幅 ≥ 10%
-        return False
+                return price_drop >= 0.03  # 从最新入仓价下跌 ≥ 3%
+                
+    def after_enter(self, pair: str, trade: Trade, **kwargs):
+        if trade.enter_tag == 'buy_signal_rsi_special_dca':
+            trade.custom_data['signal_price'] = trade.open_rate  # 记录信号触发时的价格
 
     def custom_stoploss(self, pair: str, trade, current_rate: float, current_profit: float, **kwargs) -> float:
         """
@@ -151,14 +160,14 @@ class v5(IStrategy):
         - 当 RSI < 9 时，触发 buy_signal_rsi_special_dca 信号
         """
         dataframe.loc[
-            (dataframe['rsi'] <= 20) & (dataframe['rsi_less_1h'] == True) & (dataframe['volume'] > 0),
+            (dataframe['rsi'] <= 16) & (dataframe['rsi_less_1h'] == True) & (dataframe['volume'] > 0),
             ['enter_long', 'enter_tag']
         ] = (1, 'buy_signal_rsi_normal')
 
-        dataframe.loc[
-            (dataframe['rsi'] < 9) & (dataframe['volume'] > 0),
-            ['enter_long', 'enter_tag']
-        ] = (1, 'buy_signal_rsi_special_dca')
+        conditions = (dataframe['rsi'] < 9) & (dataframe['volume'] > 0)
+        dataframe.loc[conditions, 'enter_long'] = 1
+        dataframe.loc[conditions, 'enter_tag'] = 'buy_signal_rsi_special_dca'
+        dataframe.loc[conditions, 'signal_price'] = dataframe.loc[conditions, 'close']
 
         return dataframe
 
